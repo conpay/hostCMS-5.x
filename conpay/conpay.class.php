@@ -79,11 +79,13 @@ class conpay
 		else jQuery(document).ready(mod_conpay);
 
 		function mod_conpay() {
+			try {
 				window.conpay.init('/modules/conpay/conpay-proxy.php', {'className': 'button', "."'tagName': 'a', 'text': '<span>Купить в кредит</span>'}".(($user_details) ? ', '.json_encode($user_details) : '').");
 				window.conpay.addButton('".$checksum."', '".(($cont_id = $CONPAY_CONTAINER_ID) ? $cont_id : 'conpay-link'.$id)."', ";
 
 		$script .= json_encode($details);
 		$script .= ");
+			} catch(e){};
 		}
 		</script>";
 
