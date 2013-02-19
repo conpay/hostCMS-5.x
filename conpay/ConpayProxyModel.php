@@ -8,6 +8,10 @@ class ConpayProxyModel
 	/**
 	 * @var string
 	 */
+	private $apiKey;
+	/**
+	 * @var string
+	 */
 	private $serviceUrl = 'https://www.conpay.ru/service/proxy';
 	/**
 	 * @var string
@@ -22,13 +26,18 @@ class ConpayProxyModel
 	 */
 	private $conpayCharset = 'UTF-8';
 
+	/**
+	 * @constructor
+	 * @throws Exception
+	 */
 	public function __construct()
 	{
-		if (!$this->isSelfRequest()) {
-			throw new Exception('Incorrect request', 403);
+		$this->serviceAction = isset($_POST['conpay-action']) ? $_POST['conpay-action'] : '';
+
+		if (!$this->isSelfRequest() || !$this->isPostRequest() || !$this->isCookieSet()) {
+			throw new Exception('Incorrect request');
 		}
 
-		$this->serviceAction = isset($_POST['conpay-action']) ? $_POST['conpay-action'] : '';
 		$this->serviceUrl = rtrim($this->serviceUrl.'/'.$this->serviceAction, '/');
 	}
 
@@ -43,16 +52,26 @@ class ConpayProxyModel
 	 * @return boolean
 	 */
 	public function isPostRequest() {
-		return isset($_SERVER['REQUEST_METHOD']) && !strcasecmp($_SERVER['REQUEST_METHOD'], 'POST');
+		return isset($_SERVER['REQUEST_METHOD']) && !strcasecmp($_SERVER['REQUEST_METHOD'], 'POST') && !empty($_POST);
+	}
+
+	/**
+	 * @return boolean
+	 */
+	public function isCookieSet()
+	{
+		if (!$this->serviceAction) {
+			return is_numeric($_POST['rand']) && ($_COOKIE['conpay-cs'] === $_POST['rand']);
+		}
+		return true;
 	}
 
 	/**
 	 * @return string
 	 */
-	public function sendRequest()
-	{
-		$response = function_exists('curl_init') ? $this->getViaCurl() : $this->getViaFileGC();
-		return $this->convertCharset($this->conpayCharset, $this->charset, $response);
+	public function sendRequest() {
+		$result = function_exists('curl_init') ? $this->useCurl() : $this->useFileGC();
+		return $this->convertCharset($this->conpayCharset, $this->charset, $result);
 	}
 
 	/**
@@ -62,6 +81,16 @@ class ConpayProxyModel
 	public function setMerchantId($id)
 	{
 		$this->merchantId = (int)$id;
+		return $this;
+	}
+
+	/**
+	 * @param string $pass
+	 * @return ConpayProxyModel
+	 */
+	public function setApiKey($pass)
+	{
+		$this->apiKey = $pass;
 		return $this;
 	}
 
@@ -79,11 +108,11 @@ class ConpayProxyModel
 	 * @return string
 	 * @throws Exception
 	 */
-	private function getViaCurl()
+	private function useCurl()
 	{
 		$ch = curl_init($this->serviceUrl);
 
-		curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 5.1; rv:9.0.1) Gecko/20100101 Firefox/9.0.1');
+		curl_setopt($ch, CURLOPT_USERAGENT, $this->getUserAgent());
 		curl_setopt($ch, CURLOPT_REFERER, $_SERVER['HTTP_REFERER']);
 		curl_setopt($ch, CURLOPT_POST, 1);
 		curl_setopt($ch, CURLOPT_POSTFIELDS, $this->getQueryData());
@@ -95,7 +124,10 @@ class ConpayProxyModel
 		{
 			$error = curl_error($ch);
 			curl_close($ch);
-			throw new Exception($this->convertCharset($this->conpayCharset, $this->charset, $error), 500);
+			throw new Exception($this->convertCharset($this->conpayCharset, $this->charset, $error));
+		}
+		elseif (!$data) {
+			throw new Exception('Server didn\'t return any data');
 		}
 
 		curl_close($ch);
@@ -105,15 +137,16 @@ class ConpayProxyModel
 	/**
 	 * @return string
 	 */
-	private function getViaFileGC()
+	private function useFileGC()
 	{
 		$options = array(
 			'http'=>array(
 				'method'=>"POST",
 				'content'=>$this->getQueryData(),
 				'header'=>
-					"Content-type: application/x-www-form-urlencoded\r\n".
-					"Referer: {$_SERVER['HTTP_REFERER']}\r\n"
+				"Content-type: application/x-www-form-urlencoded\r\n".
+					"Referer: {$_SERVER['HTTP_REFERER']}\r\n".
+					"User-Agent: ".$this->getUserAgent()."\r\n"
 			)
 		);
 
@@ -123,18 +156,63 @@ class ConpayProxyModel
 
 	/**
 	 * @return string
+	 */
+	private function getUserAgent() {
+		return 'Conpay/Merchant/'.$this->merchantId;
+	}
+
+	/**
+	 * @return string
 	 * @throws Exception
 	 */
 	private function getQueryData()
 	{
 		if ($this->merchantId === null) {
-			throw new Exception('MerchantId is not set', 500);
+			throw new Exception('MerchantId is not set');
 		}
-		$data = $this->isPostRequest() ? http_build_query($_POST) : $_SERVER['QUERY_STRING'];
-		if (strpos($data, 'merchant=') === false) {
-			$data .= '&merchant='.$this->merchantId;
+
+		$_POST = $this->convertCharset($this->charset, $this->conpayCharset, $_POST);
+
+		if (empty($_POST['merchant'])) {
+			$_POST['merchant'] = $this->merchantId;
 		}
-		return $this->convertCharset($this->charset, $this->conpayCharset, $data);
+
+		if (empty($_POST['checksum'])) {
+			$_POST['checksum'] = $this->createChecksum($_POST);
+		}
+
+		return http_build_query($_POST);
+	}
+
+	/**
+	 * @param $data
+	 * @return string
+	 */
+	private function createChecksum($data)
+	{
+		$totalsum = 0;
+
+		if (isset($data['goods']) && is_array($data['goods']) && !empty($data['goods']))
+		{
+			foreach ($data['goods'] as $p) {
+				$totalsum += $p['price'] * (isset($p['quantity']) && $p['quantity'] > 1 ? (int)$p['quantity'] : 1);
+			}
+		}
+
+		$parts = array(
+			$this->apiKey,
+			isset($data['delivery']) && is_numeric($data['delivery']) ? $totalsum + $data['delivery'] : $totalsum,
+			$this->merchantId
+		);
+
+		if (isset($data['custom']) && is_array($data['custom']) && !empty($data['custom']))
+		{
+			foreach ($data['custom'] as $customVar) {
+				$parts[] = $customVar;
+			}
+		}
+
+		return md5(implode('!', $parts));
 	}
 
 	/**
@@ -145,9 +223,18 @@ class ConpayProxyModel
 	 */
 	private function convertCharset($in, $out, $data)
 	{
-		if ($in !== $out && function_exists('iconv')) {
-			return iconv($in, $out, $data);
+		if ($in !== $out && function_exists('iconv'))
+		{
+			if (is_string($data)) {
+				$data = iconv($in, $out, $data);
+			}
+			else if (is_array($data)) {
+				foreach ($data as &$item) {
+					$item = $this->convertCharset($in, $out, $item);
+				}
+			}
 		}
+
 		return $data;
 	}
 }
